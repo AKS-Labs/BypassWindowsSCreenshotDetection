@@ -1,6 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
+#include <stdio.h>
 #include "MinHook.h"
 #include <TlHelp32.h>
 
