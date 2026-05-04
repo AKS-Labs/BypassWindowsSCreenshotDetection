@@ -73,7 +73,7 @@ namespace NoFocusLossGUI
                 {
                     int rva = dll.GetExportAddress("InitializeFeatures");
                     IntPtr exportAddress = IntPtr.Add(hModule, rva);
-                    Injector.CallExport(selected, exportAddress, BypassScreenshot.IsChecked == true);
+                    Injector.CallExport(selected, exportAddress, BypassScreenshot.IsChecked == true ? 1 : 0);
                 }
                 catch (Exception ex)
                 {

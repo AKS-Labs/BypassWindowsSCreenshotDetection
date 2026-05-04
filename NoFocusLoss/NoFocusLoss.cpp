@@ -143,29 +143,42 @@ LRESULT CALLBACK NewWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
 }
 
 BOOL CALLBACK ResetAffinityCallback(HWND hWnd, LPARAM lParam) {
-	DWORD processId;
-	GetWindowThreadProcessId(hWnd, &processId);
-	if (processId == (DWORD)lParam) {
-		// Reset to WDA_NONE
-		SetWindowDisplayAffinity(hWnd, WDA_NONE);
+	// Reset to WDA_NONE
+	if (SetWindowDisplayAffinity(hWnd, WDA_NONE)) {
+		OutputDebugString(L"[NoFocusLoss] Successfully reset affinity for a window.");
 	}
 	return TRUE;
 }
 
-extern "C" __declspec(dllexport) void InitializeFeatures(bool bypassScreenshot)
+extern "C" __declspec(dllexport) void InitializeFeatures(int bypassScreenshot)
 {
-	if (bypassScreenshot) {
+	if (bypassScreenshot != 0) {
+		OutputDebugString(L"[NoFocusLoss] Initializing screenshot bypass...");
 		HMODULE user32 = GetModuleHandle(L"user32.dll");
 		if (user32) {
 			void* pSetWindowDisplayAffinity = GetProcAddress(user32, "SetWindowDisplayAffinity");
 			if (pSetWindowDisplayAffinity) {
-				MH_CreateHookEx(pSetWindowDisplayAffinity, DetourSetWindowDisplayAffinity, &real_SetWindowDisplayAffinity);
-				MH_EnableHook(pSetWindowDisplayAffinity);
+				MH_STATUS status = MH_CreateHookEx(pSetWindowDisplayAffinity, DetourSetWindowDisplayAffinity, &real_SetWindowDisplayAffinity);
+				if (status == MH_OK) {
+					MH_EnableHook(pSetWindowDisplayAffinity);
+					OutputDebugString(L"[NoFocusLoss] SetWindowDisplayAffinity hook enabled.");
+				}
+				else {
+					OutputDebugString(L"[NoFocusLoss] Failed to create SetWindowDisplayAffinity hook.");
+				}
 			}
 		}
 
-		// Also reset any existing protected windows
-		EnumWindows(ResetAffinityCallback, GetCurrentProcessId());
+		// Also reset any existing protected windows (Top-level and Children)
+		EnumWindows([](HWND hWnd, LPARAM lParam) {
+			DWORD processId;
+			GetWindowThreadProcessId(hWnd, &processId);
+			if (processId == (DWORD)lParam) {
+				SetWindowDisplayAffinity(hWnd, WDA_NONE);
+				EnumChildWindows(hWnd, ResetAffinityCallback, 0);
+			}
+			return TRUE;
+		}, GetCurrentProcessId());
 	}
 }
 
