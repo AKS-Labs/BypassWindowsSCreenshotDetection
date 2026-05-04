@@ -51,6 +51,20 @@ namespace NoFocusLossGUI
             }
         }
 
+        private void CallExport(ProcessInfo process, PeFile dll, IntPtr hModule, string exportName)
+        {
+            try
+            {
+                int rva = dll.GetExportAddress(exportName);
+                IntPtr exportAddress = IntPtr.Add(hModule, rva);
+                Injector.CallExport(process, exportAddress);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Failed to call {exportName}: {ex.Message}");
+            }
+        }
+
         private void Inject(object sender, RoutedEventArgs e)
         {
             var selected = Processes.SelectedItem as ProcessInfo;
@@ -58,27 +72,13 @@ namespace NoFocusLossGUI
             if (selected == null)
                 return;
 
-            PeFile dll = Dll64;
+            PeFile dll = selected.Is64Bit ? Dll64 : Dll32;
 
-            if (selected.Is64Bit == false)
-            {
-                dll = Dll32;
-            }
-            
             IntPtr hModule = Injector.Inject(selected, dll);
 
-            if (hModule != IntPtr.Zero)
+            if (hModule != IntPtr.Zero && BypassScreenshot.IsChecked == true)
             {
-                try
-                {
-                    int rva = dll.GetExportAddress("InitializeFeatures");
-                    IntPtr exportAddress = IntPtr.Add(hModule, rva);
-                    Injector.CallExport(selected, exportAddress, BypassScreenshot.IsChecked == true ? 1 : 0);
-                }
-                catch (Exception ex)
-                {
-                    Debug.WriteLine($"Failed to call InitializeFeatures: {ex.Message}");
-                }
+                CallExport(selected, dll, hModule, "EnableScreenshotBypass");
             }
 
             Processes.Items.Remove(selected);
@@ -92,12 +92,24 @@ namespace NoFocusLossGUI
             if (selected == null)
                 return;
 
-            PeFile dll = Dll64;
+            PeFile dll = selected.Is64Bit ? Dll64 : Dll32;
 
-            if (selected.Is64Bit == false)
+            // Cleanly disable the bypass thread before unloading
+            // (best-effort – if it fails, unload will still run DLL_PROCESS_DETACH which cleans up)
+            try
             {
-                dll = Dll32;
+                // Re-get process info to find current module handle
+                var fresh = Injector.GetProcessInfo((int)selected.Id);
+                foreach (var mod in fresh.Modules.Values)
+                {
+                    if (mod.Path.ToUpperInvariant().Contains("NOFOCUSLOSS"))
+                    {
+                        CallExport(selected, dll, mod.MemoryAddress, "DisableScreenshotBypass");
+                        break;
+                    }
+                }
             }
+            catch { }
 
             Injector.Unload(selected, dll);
 
