@@ -1,76 +1,134 @@
 # NoFocusLoss
-This is a utility that prevents games from pausing/muting on background by making sure the unfocus message doesn't get to it.
 
-This will break some things but uhh
+> A Windows DLL injection utility that keeps apps running normally when unfocused, and optionally bypasses screenshot/capture protection.
 
-Uses injection since I can't really find any other way to do what I need.
+![GitHub Actions](https://github.com/AKS-Labs/BypassWindowsSCreenshotDetection/actions/workflows/build.yml/badge.svg)
 
-# Caution
-Use this utility at your own risk! This utility uses process injection. 
+---
 
-Don't use in multiplayer games, only use in games that actually need it. Be careful which process you inject into, as it could cause a softlock, requiring a restart.
+## Features
+
+| Feature | What it does |
+|---|---|
+| 🎮 **Fix Focus Loss** | Prevents games and apps from pausing, muting, or losing controller input when you alt-tab |
+| 📷 **Bypass Screenshot** | Removes the black-screen protection so Snipping Tool, OCR (`Win+Shift+T`), and screen recorders can capture the window |
+| ✨ **Both Features** | Applies both at once |
+
+Each feature can be injected **independently** — use only what you need.
+
+---
+
+## Download
+
+Go to [**Actions**](../../actions) → latest successful build → download **`NoFocusLoss-Release`** artifact.
+
+Extract the zip. You'll get:
+```
+NoFocusLossGUI.exe      ← Run this
+NoFocusLoss.dll         ← 32-bit payload (don't move)
+NoFocusLoss64.dll       ← 64-bit payload (don't move)
+SharpestInjector.dll    ← Injector library (don't move)
+```
+
+---
 
 ## Usage
 
-1. Launch NoFocusLossGUI.exe
+1. **Run** `NoFocusLossGUI.exe` (as Administrator if targeting elevated processes)
+2. Click **Refresh** to list running windowed processes
+3. Select the target process
+4. Click one of the three inject buttons:
+   - 🟢 **Fix Focus Loss** — stops the app from pausing/muting when unfocused
+   - 🟣 **Bypass Screenshot** — removes black-screen capture protection
+   - 🔵 **Both Features** — applies both
+5. To revert, select the process in the bottom list and click **Unload**
 
-![image](https://github.com/araghon007/NoFocusLoss/assets/10870921/c3a263ea-d35d-4521-adf3-c423694d8033)
+---
 
-2. Press Refresh. This may take a short while.
+## Use Cases
 
-![image](https://github.com/araghon007/NoFocusLoss/assets/10870921/daed98f0-6078-485e-b026-77139057e38c)
+- **Multi-monitor gaming** — alt-tab to a second monitor without pausing your game or muting audio
+- **Controller gaming in background** — play with a controller while the game window is not focused (XInput games only)
+- **VR games with bad input handling** — bypass Unity's requirement that the window be focused for input
+- **App developers / testers** — bypass screenshot protection you added to your own apps for testing purposes (OCR, screen capture, visual regression tests, etc.)
+- **Cutscene skipping** — alt-tab freely without cutscenes pausing
 
-3. From the list on top, select the window name of the game you want to fix. You can also type the name on your keyboard after clicking on any item for it to be selected. Magic!
+---
 
-![NoFocusLossGUI_3Eq3gTvu8R](https://github.com/araghon007/NoFocusLoss/assets/10870921/5eb3f0bd-2467-4cdb-b85d-dff27e9425c5)
+## Requirements
 
-4. Click on Inject
+- Windows 10 / 11 (x86 or x64)
+- Administrator rights (recommended)
+- Visual C++ Redistributable (usually already installed)
 
-![NoFocusLossGUI_hNECUefsBt](https://github.com/araghon007/NoFocusLoss/assets/10870921/8dc1c1f8-f427-4b28-9614-c58f7ee01174)
+> **Windows 11** gets the full Mica translucent UI. Windows 10 falls back to a solid dark theme gracefully.
 
-5. Enjoy!
+---
 
-To revert the fix, click on the game in the bottom list and click Unload.
+## Building from Source
 
-![image](https://github.com/araghon007/NoFocusLoss/assets/10870921/5394dfdc-1a10-425c-b27b-7d891f027c3b)
+### Prerequisites
+- Visual Studio 2022 with:
+  - **Desktop development with C++** workload
+  - **.NET desktop development** workload
+- Git (for submodules)
 
+### Steps
 
-## Why?
-Multimonitor users
+```powershell
+git clone https://github.com/AKS-Labs/BypassWindowsSCreenshotDetection.git
+cd BypassWindowsSCreenshotDetection
+git submodule update --init --recursive
+```
 
-## How?
-Magic beyond my comprehension (I will forget how this entire repo works within a week)
+Open `NoFocusLoss.sln` in Visual Studio → set configuration to **Release** → **Build Solution**.
 
-Really though, it's just replacing the window's WndProc to block certain messages and detouring calls to GetForegroundWindow and SetCursorPos
+Output will be in `NoFocusLossGUI\bin\Release\`.
 
-## Features:
-- Alt-tab during cutscenes without having to worry about them pausing or muting
-- Play games on background using a controller as long as they're using xinput and not Windows.Gaming.Input (Thanks Microsoft)
-- Bypass Unity's shit no good very bad input system that makes you unable to use controllers when the game isn't focused, even in VR
-- Stops mouse capture by disabling calls to SetCursorPos (which is a dumb way to do capture in the first place)
+### CI/CD
 
-## Limitations:
-- For now only affects the main window of the injected program
+Every push to `main` automatically builds via GitHub Actions and uploads the artifact. See [`.github/workflows/build.yml`](.github/workflows/build.yml).
 
-## Drawbacks:
-- Injection, maybe don't use it in multiplayer games
-- While active makes it very difficult, if not impossible, to interact with window title bar elements, such as dragging, minimize/maximize and close if the game captures the mouse cursor
+---
 
-## Tested Games:
+## ⚠ Caution
+
+- **Do not use in multiplayer games** — anti-cheat systems detect DLL injection and will ban you
+- **Use only on processes you own or have permission to modify**
+- Injecting into the wrong process can cause crashes — only windowed processes are shown in the list
+- This tool uses techniques that security software may flag as suspicious
+
+---
+
+## How it works (technical)
+
+See **[HOW_APP_WORKS.md](HOW_APP_WORKS.md)** for a full technical breakdown including:
+- LoadLibrary injection mechanism
+- MinHook API hooking details
+- Named Event IPC design
+- Screenshot bypass background thread
+- Cleanup and unloading
+
+---
+
+## Known Issues
+
+- EA Origin overlay may appear frozen until you alt-tab once
+- Apps using `Windows.Gaming.Input` (not XInput) may still lose controller input
+- UWP / sandboxed apps cannot be injected into
+
+## Tested On
+
 - Teardown
 - Alan Wake
-- Need For Speed 2015 (2016)
-- I Expect You To Die 3 (yay, this fixed controller input)
+- Need For Speed 2015
+- I Expect You To Die 3
 - The Long Dark
 
-## Known Issues:
-- EA's Origin overlay appears frozen, until you try alt-tabbing which forces it to refresh
+---
 
-## TODO:
-- Figure out automatic injection?
-- Maybe a truly global solution?
-- Try to do this with UWP apps (Yeah, good luck)
-- Add support for doing this for multiple app windows, and specifying a window you want to do this with other than the supposedly main one
-- Maybe add some way to force games that use SetCursorPos for mouse capture to use ClipCursor instead, a counter that would count the amount of SetCursorPos calls per second and then redirect?
+## Credits
 
-### Thanks to pretty much all the same people from my X1nput repo, since I kinda used that as a base for this, plus whoever is mentioned in the code
+- [MinHook](https://github.com/TsudaKageyu/minhook) by Tsuda Kageyu — inline API hooking
+- [SharpestInjector](https://github.com/araghon007/SharpestInjector) — C# injection library
+- Original NoFocusLoss concept and code by [@araghon007](https://github.com/araghon007)

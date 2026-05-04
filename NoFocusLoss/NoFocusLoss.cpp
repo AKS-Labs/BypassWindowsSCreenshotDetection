@@ -11,18 +11,14 @@
 
 // ── GetMainWindow ────────────────────────────────────────────
 struct EnumWndArgs { HWND hwnd = nullptr; int area = -1; };
-
-static BOOL CALLBACK _EnumWndCb(HWND h, LPARAM lp)
-{
+static BOOL CALLBACK _EnumWndCb(HWND h, LPARAM lp) {
     auto* a = (EnumWndArgs*)lp;
     RECT r{}; GetWindowRect(h, &r);
     int area = (r.right - r.left) * (r.bottom - r.top);
     if (area > a->area) { a->area = area; a->hwnd = h; }
     return TRUE;
 }
-
-static HWND GetMainWindow()
-{
+static HWND GetMainWindow() {
     DWORD pid = GetCurrentProcessId();
     EnumWndArgs args{};
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
@@ -37,181 +33,118 @@ static HWND GetMainWindow()
     return args.hwnd;
 }
 
-// ── MinHook wrapper ──────────────────────────────────────────
+// ── MinHook helper ───────────────────────────────────────────
 template<typename T>
-inline MH_STATUS MH_Hook(LPVOID target, LPVOID detour, T** original)
-{ return MH_CreateHook(target, detour, reinterpret_cast<LPVOID*>(original)); }
+inline MH_STATUS MH_Hook(LPVOID t, LPVOID d, T** o)
+{ return MH_CreateHook(t, d, reinterpret_cast<LPVOID*>(o)); }
 
-// ── Globals ──────────────────────────────────────────────────
-static HWND    g_hwnd      = nullptr;
+// ── State ────────────────────────────────────────────────────
+static HWND    g_hwnd     = nullptr;
 static BOOL    g_unfocused = FALSE;
-static WNDPROC g_oldProc   = nullptr;
+static WNDPROC g_oldProc  = nullptr;
 
 static decltype(GetForegroundWindow)*      real_GFW  = nullptr;
 static decltype(SetCursorPos)*             real_SCP  = nullptr;
 static decltype(SetWindowDisplayAffinity)* real_SWDA = nullptr;
 
-static volatile LONG g_bypassActive  = 0;
-static HANDLE        g_bypassThread  = nullptr;
-static HMODULE       g_hModule       = nullptr;
+static volatile LONG g_bypassActive = 0;
+static HANDLE        g_bypassThread = nullptr;
 
-// ── Detours ──────────────────────────────────────────────────
-static HWND WINAPI Detour_GFW()               { return g_hwnd; }
-static BOOL WINAPI Detour_SCP(int X, int Y)   { return g_unfocused ? TRUE : real_SCP(X, Y); }
+// ── Focus-loss detours ───────────────────────────────────────
+static HWND WINAPI Detour_GFW()             { return g_hwnd; }
+static BOOL WINAPI Detour_SCP(int X, int Y) { return g_unfocused ? TRUE : real_SCP(X, Y); }
 
-static BOOL WINAPI Detour_SWDA(HWND hWnd, DWORD /*affinity*/)
-{
-    // Swallow ANY protection request – always keep window capturable
-    if (real_SWDA) real_SWDA(hWnd, WDA_NONE);
-    return TRUE;
-}
-
-// ── WndProc ──────────────────────────────────────────────────
-static LRESULT CALLBACK NewWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
-{
+static LRESULT CALLBACK NewWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
-    case WM_NCACTIVATE:
-        if (wp == TRUE)  { g_unfocused = FALSE; break; }
-        if (wp == FALSE) { g_unfocused = TRUE;  return 0; }
-        break;
-    case WM_ACTIVATE:    if (wp == WA_INACTIVE) return 0; break;
-    case WM_ACTIVATEAPP: if (wp == FALSE)       return 0; break;
-    case WM_KILLFOCUS:                          return 0;
-    case WM_IME_SETCONTEXT: if (wp == FALSE)    return 0; break;
+    case WM_NCACTIVATE:    if (wp == FALSE) { g_unfocused = TRUE;  return 0; }
+                           else               g_unfocused = FALSE; break;
+    case WM_ACTIVATE:      if (wp == WA_INACTIVE)  return 0; break;
+    case WM_ACTIVATEAPP:   if (wp == FALSE)         return 0; break;
+    case WM_KILLFOCUS:                              return 0;
+    case WM_IME_SETCONTEXT: if (wp == FALSE)        return 0; break;
     }
     return CallWindowProc(g_oldProc, h, msg, wp, lp);
 }
 
-// ── Screenshot bypass helpers ─────────────────────────────────
-static BOOL CALLBACK _ResetChild(HWND h, LPARAM)
-{
-    SetWindowDisplayAffinity(h, WDA_NONE);
-    return TRUE;
+static void SetupFocusFix() {
+    real_GFW = GetForegroundWindow;
+    real_SCP = SetCursorPos;
+    MH_Hook(GetForegroundWindow, Detour_GFW, &real_GFW);
+    MH_Hook(SetCursorPos,        Detour_SCP, &real_SCP);
+    MH_EnableHook(MH_ALL_HOOKS);
+    g_hwnd = GetMainWindow();
+    if (g_hwnd)
+        g_oldProc = (WNDPROC)SetWindowLongPtr(g_hwnd, GWLP_WNDPROC, (LONG_PTR)NewWndProc);
 }
 
-static void StripAllProtection()
-{
+// ── Screenshot bypass ────────────────────────────────────────
+static BOOL WINAPI Detour_SWDA(HWND hWnd, DWORD) {
+    if (real_SWDA) real_SWDA(hWnd, WDA_NONE);
+    return TRUE;
+}
+static BOOL CALLBACK _ResetChild(HWND h, LPARAM) { SetWindowDisplayAffinity(h, WDA_NONE); return TRUE; }
+static void StripAllProtection() {
     DWORD pid = GetCurrentProcessId();
     EnumWindows([](HWND h, LPARAM pid) -> BOOL {
-        DWORD wp = 0;
-        GetWindowThreadProcessId(h, &wp);
-        if (wp == (DWORD)pid) {
-            SetWindowDisplayAffinity(h, WDA_NONE);
-            EnumChildWindows(h, _ResetChild, 0);
-        }
+        DWORD wp = 0; GetWindowThreadProcessId(h, &wp);
+        if (wp == (DWORD)pid) { SetWindowDisplayAffinity(h, WDA_NONE); EnumChildWindows(h, _ResetChild, 0); }
         return TRUE;
     }, (LPARAM)pid);
 }
-
-// Background thread – re-strips every 250 ms in case app fights back
-static DWORD WINAPI BypassThread(LPVOID)
-{
-    while (InterlockedCompareExchange(&g_bypassActive, 0, 0))
-    {
-        StripAllProtection();
-        Sleep(250);
-    }
+static DWORD WINAPI BypassThread(LPVOID) {
+    while (InterlockedCompareExchange(&g_bypassActive, 0, 0)) { StripAllProtection(); Sleep(250); }
     return 0;
 }
-
-static void StartScreenshotBypass()
-{
-    // Hook SetWindowDisplayAffinity
+static void StartScreenshotBypass() {
     HMODULE u32 = GetModuleHandleW(L"user32.dll");
-    if (u32) {
-        void* target = GetProcAddress(u32, "SetWindowDisplayAffinity");
-        if (target && real_SWDA == nullptr) {
-            real_SWDA = SetWindowDisplayAffinity; // fallback
-            if (MH_Hook(target, Detour_SWDA, &real_SWDA) == MH_OK)
-                MH_EnableHook(target);
-        }
+    if (u32 && !real_SWDA) {
+        void* t = GetProcAddress(u32, "SetWindowDisplayAffinity");
+        if (t) { real_SWDA = SetWindowDisplayAffinity; MH_Hook(t, Detour_SWDA, &real_SWDA); MH_EnableHook(t); }
     }
-
-    // Immediately strip existing protection
     StripAllProtection();
-
-    // Start the keep-alive thread
     if (InterlockedExchange(&g_bypassActive, 1) == 0)
         g_bypassThread = CreateThread(nullptr, 0, BypassThread, nullptr, 0, nullptr);
 }
-
-static void StopScreenshotBypass()
-{
+static void StopScreenshotBypass() {
     InterlockedExchange(&g_bypassActive, 0);
-    if (g_bypassThread) {
-        WaitForSingleObject(g_bypassThread, 1500);
-        CloseHandle(g_bypassThread);
-        g_bypassThread = nullptr;
-    }
+    if (g_bypassThread) { WaitForSingleObject(g_bypassThread, 1500); CloseHandle(g_bypassThread); g_bypassThread = nullptr; }
     HMODULE u32 = GetModuleHandleW(L"user32.dll");
-    if (u32) {
-        void* target = GetProcAddress(u32, "SetWindowDisplayAffinity");
-        if (target) MH_DisableHook(target);
-    }
+    if (u32) { void* t = GetProcAddress(u32, "SetWindowDisplayAffinity"); if (t) MH_DisableHook(t); }
     real_SWDA = nullptr;
 }
 
-// ── Init thread (safe DllMain alternative) ───────────────────
-//  Reads the named flag written by the GUI before injection.
-static DWORD WINAPI InitThread(LPVOID)
-{
-    // Give the loader a moment to finish
-    Sleep(50);
+// ── Init thread: reads named events set by GUI before injection ──
+// Local\NFL_Focus_{PID}  → enable focus loss fix
+// Local\NFL_Bypass_{PID} → enable screenshot bypass
+static DWORD WINAPI InitThread(LPVOID) {
+    Sleep(100); // let LoadLibrary finish
+    wchar_t name[128];
+    swprintf_s(name, 128, L"Local\\NFL_Focus_%lu", GetCurrentProcessId());
+    HANDLE hF = OpenEventW(SYNCHRONIZE, FALSE, name);
+    bool doFocus = (hF != nullptr); if (hF) CloseHandle(hF);
 
-    // GUI creates this named event ONLY when bypass is requested
-    wchar_t evtName[128];
-    swprintf_s(evtName, L"Local\\NFL_Bypass_%lu", GetCurrentProcessId());
-    HANDLE hEvt = OpenEventW(SYNCHRONIZE, FALSE, evtName);
-    bool doBypass = (hEvt != nullptr);
-    if (hEvt) CloseHandle(hEvt);
+    swprintf_s(name, 128, L"Local\\NFL_Bypass_%lu", GetCurrentProcessId());
+    HANDLE hB = OpenEventW(SYNCHRONIZE, FALSE, name);
+    bool doBypass = (hB != nullptr); if (hB) CloseHandle(hB);
 
-    if (doBypass)
-        StartScreenshotBypass();
-
+    if (doFocus)  SetupFocusFix();
+    if (doBypass) StartScreenshotBypass();
     return 0;
 }
 
 // ── DllMain ──────────────────────────────────────────────────
-BOOL APIENTRY DllMain(HMODULE hMod, DWORD reason, LPVOID)
-{
-    switch (reason)
-    {
-    case DLL_PROCESS_ATTACH:
-    {
-        g_hModule = hMod;
+BOOL APIENTRY DllMain(HMODULE hMod, DWORD reason, LPVOID) {
+    if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hMod);
-
         MH_Initialize();
-
-        g_hwnd = GetMainWindow();
-
-        // Focus-loss hooks
-        real_GFW = GetForegroundWindow;
-        real_SCP = SetCursorPos;
-        MH_Hook(GetForegroundWindow, Detour_GFW, &real_GFW);
-        MH_Hook(SetCursorPos,        Detour_SCP, &real_SCP);
-        MH_EnableHook(MH_ALL_HOOKS);
-
-        if (g_hwnd)
-            g_oldProc = (WNDPROC)SetWindowLongPtr(g_hwnd, GWLP_WNDPROC, (LONG_PTR)NewWndProc);
-
-        // Screenshot bypass decision is made in a separate thread
-        // (avoids loader-lock issues in DllMain)
         HANDLE t = CreateThread(nullptr, 0, InitThread, nullptr, 0, nullptr);
         if (t) CloseHandle(t);
-        break;
     }
-    case DLL_PROCESS_DETACH:
-    {
+    else if (reason == DLL_PROCESS_DETACH) {
         StopScreenshotBypass();
-
-        if (g_hwnd && g_oldProc)
-            SetWindowLongPtr(g_hwnd, GWLP_WNDPROC, (LONG_PTR)g_oldProc);
-
+        if (g_hwnd && g_oldProc) SetWindowLongPtr(g_hwnd, GWLP_WNDPROC, (LONG_PTR)g_oldProc);
         MH_DisableHook(MH_ALL_HOOKS);
         MH_Uninitialize();
-        break;
-    }
     }
     return TRUE;
 }
