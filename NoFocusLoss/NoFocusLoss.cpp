@@ -1,8 +1,13 @@
-﻿#define WIN32_LEAN_AND_MEAN             // Exclude rarely-used stuff from Windows headers
+#define WIN32_LEAN_AND_MEAN             // Exclude rarely-used stuff from Windows headers
 #define NOMINMAX
 #include <Windows.h>
 #include "MinHook.h"
 #include <TlHelp32.h>
+
+// WDA_NONE is 0, but let's be explicit
+#ifndef WDA_NONE
+#define WDA_NONE 0x00000000
+#endif
 
 // Thanks to gaspardpetit (https://gist.github.com/gaspardpetit/3b1a10f6a2a9866b2bba8eb5d8e4ef36)
 // Imagine wanting to use native API to get the main window handle. Thanks for nothing, Microsoft.
@@ -90,6 +95,7 @@ WNDPROC OldWndProc; // Window procedures are funny
 
 static decltype(GetForegroundWindow)* real_GetForegroundWindow = GetForegroundWindow;
 static decltype(SetCursorPos)* real_SetCursorPos = SetCursorPos;
+static decltype(SetWindowDisplayAffinity)* real_SetWindowDisplayAffinity = nullptr;
 
 HWND WINAPI DetourGetForegroundWindow()
 {
@@ -104,6 +110,11 @@ BOOL WINAPI DetourSetCursorPos(int X, int Y)
 	return real_SetCursorPos(X, Y);
 }
 
+BOOL WINAPI DetourSetWindowDisplayAffinity(HWND hWnd, DWORD dwAffinity)
+{
+	// Force WDA_NONE (0) to disable screenshot protection
+	return real_SetWindowDisplayAffinity(hWnd, WDA_NONE);
+}
 
 LRESULT CALLBACK NewWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
@@ -131,6 +142,32 @@ LRESULT CALLBACK NewWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
 	return CallWindowProc(OldWndProc, hwnd, message, wParam, lParam);
 }
 
+BOOL CALLBACK ResetAffinityCallback(HWND hWnd, LPARAM lParam) {
+	DWORD processId;
+	GetWindowThreadProcessId(hWnd, &processId);
+	if (processId == (DWORD)lParam) {
+		// Reset to WDA_NONE
+		SetWindowDisplayAffinity(hWnd, WDA_NONE);
+	}
+	return TRUE;
+}
+
+extern "C" __declspec(dllexport) void InitializeFeatures(bool bypassScreenshot)
+{
+	if (bypassScreenshot) {
+		HMODULE user32 = GetModuleHandle(L"user32.dll");
+		if (user32) {
+			void* pSetWindowDisplayAffinity = GetProcAddress(user32, "SetWindowDisplayAffinity");
+			if (pSetWindowDisplayAffinity) {
+				MH_CreateHookEx(pSetWindowDisplayAffinity, DetourSetWindowDisplayAffinity, &real_SetWindowDisplayAffinity);
+				MH_EnableHook(pSetWindowDisplayAffinity);
+			}
+		}
+
+		// Also reset any existing protected windows
+		EnumWindows(ResetAffinityCallback, GetCurrentProcessId());
+	}
+}
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD  fdwReason, LPVOID lpReserved)
 {
@@ -163,4 +200,4 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  fdwReason, LPVOID lpReserved)
 		}
 	}
 	return TRUE;
-}
+}

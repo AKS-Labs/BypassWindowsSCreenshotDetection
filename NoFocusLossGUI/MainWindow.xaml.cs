@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using System.Diagnostics;
 using SharpestInjector;
 using System.Windows;
@@ -65,7 +65,21 @@ namespace NoFocusLossGUI
                 dll = Dll32;
             }
             
-            Injector.Inject(selected, dll);
+            IntPtr hModule = Injector.Inject(selected, dll);
+
+            if (hModule != IntPtr.Zero)
+            {
+                try
+                {
+                    int rva = dll.GetExportAddress("InitializeFeatures");
+                    IntPtr exportAddress = IntPtr.Add(hModule, rva);
+                    Injector.CallExport(selected, exportAddress, BypassScreenshot.IsChecked == true);
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"Failed to call InitializeFeatures: {ex.Message}");
+                }
+            }
 
             Processes.Items.Remove(selected);
             InjectedProcesses.Items.Add(selected);
