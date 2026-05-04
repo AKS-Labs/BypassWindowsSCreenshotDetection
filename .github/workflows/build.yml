@@ -35,7 +35,9 @@ jobs:
         copy NoFocusLossGUI\bin\Release\NoFocusLossGUI.exe build_output\
         copy NoFocusLossGUI\bin\Release\NoFocusLoss.dll build_output\
         copy NoFocusLossGUI\bin\Release\NoFocusLoss64.dll build_output\
-        copy NoFocusLossGUI\bin\Release\SharpestInjector.dll build_output\
+        dir /s /b SharpestInjector.dll > temp_path.txt
+        set /p SHARPEST_PATH=<temp_path.txt
+        copy "%SHARPEST_PATH%" build_output\
       shell: cmd
 
     - name: Upload Build Artifact
