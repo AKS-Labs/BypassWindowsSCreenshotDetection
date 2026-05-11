@@ -90,7 +90,7 @@ namespace NoFocusLossGUI
         }
 
         // ── Core inject helper ────────────────────────────────────────
-        private void DoInject(bool focus, bool screenshot)
+        private void DoInject(bool focus, bool screenshot, bool textCopy)
         {
             var selected = Processes.SelectedItem as ProcessInfo;
             if (selected == null) { SetStatus("⚠ Select a process first"); return; }
@@ -98,20 +98,12 @@ namespace NoFocusLossGUI
             PeFile dll = selected.Is64Bit ? Dll64 : Dll32;
             var handles = new List<EventWaitHandle>();
 
-            if (focus)
-            {
-                var ev = CreateSignal($"Local\\NFL_Focus_{selected.Id}");
-                handles.Add(ev);
-            }
-            if (screenshot)
-            {
-                var ev = CreateSignal($"Local\\NFL_Bypass_{selected.Id}");
-                handles.Add(ev);
-            }
+            if (focus)      handles.Add(CreateSignal($"Local\\NFL_Focus_{selected.Id}"));
+            if (screenshot) handles.Add(CreateSignal($"Local\\NFL_Bypass_{selected.Id}"));
+            if (textCopy)   handles.Add(CreateSignal($"Local\\NFL_TextCopy_{selected.Id}"));
 
             Injector.Inject(selected, dll);
 
-            // Keep handles alive 2 s, then release
             var capturedHandles = handles;
             var capturedId = selected.Id;
             ThreadPool.QueueUserWorkItem(_ =>
@@ -124,10 +116,11 @@ namespace NoFocusLossGUI
             Processes.Items.Remove(selected);
             InjectedProcesses.Items.Add(selected);
 
-            string feat = focus && screenshot ? "Focus Fix + Screenshot Bypass"
-                        : focus              ? "Focus Fix"
-                        :                      "Screenshot Bypass";
-            SetStatus($"✓ Injected [{feat}] into {selected}");
+            var parts = new System.Collections.Generic.List<string>();
+            if (focus)      parts.Add("Focus Fix");
+            if (screenshot) parts.Add("Screenshot Bypass");
+            if (textCopy)   parts.Add("Text Copy");
+            SetStatus($"✓ Injected [{string.Join(" + ", parts)}] into {selected}");
         }
 
         private EventWaitHandle CreateSignal(string name)
@@ -136,9 +129,10 @@ namespace NoFocusLossGUI
         }
 
         // ── Three inject buttons ──────────────────────────────────────
-        private void InjectFocus(object s, RoutedEventArgs e)      => DoInject(focus: true,  screenshot: false);
-        private void InjectScreenshot(object s, RoutedEventArgs e) => DoInject(focus: false, screenshot: true);
-        private void InjectBoth(object s, RoutedEventArgs e)       => DoInject(focus: true,  screenshot: true);
+        private void InjectFocus(object s, RoutedEventArgs e)      => DoInject(focus: true,  screenshot: false, textCopy: false);
+        private void InjectScreenshot(object s, RoutedEventArgs e) => DoInject(focus: false, screenshot: true,  textCopy: false);
+        private void InjectTextCopy(object s, RoutedEventArgs e)   => DoInject(focus: false, screenshot: false, textCopy: true);
+        private void InjectBoth(object s, RoutedEventArgs e)       => DoInject(focus: true,  screenshot: true,  textCopy: true);
 
         // ── Unload ────────────────────────────────────────────────────
         private void Unload(object s, RoutedEventArgs e)

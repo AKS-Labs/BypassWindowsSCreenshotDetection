@@ -17,6 +17,7 @@
         <SolidColorBrush x:Key="AccentBrush"        Color="#0078D4"/>
         <SolidColorBrush x:Key="AccentHoverBrush"   Color="#1A86D8"/>
         <SolidColorBrush x:Key="AccentPressedBrush" Color="#006CBD"/>
+        <SolidColorBrush x:Key="OrangeBrush"        Color="#C45911"/>
         <SolidColorBrush x:Key="GreenBrush"         Color="#0D7A0D"/>
         <SolidColorBrush x:Key="GreenHoverBrush"    Color="#178A17"/>
         <SolidColorBrush x:Key="PurpleBrush"        Color="#744DA9"/>
@@ -84,6 +85,17 @@
         <!-- Purple inject button -->
         <Style x:Key="PurpleBtn" TargetType="Button">
             <Setter Property="Background"   Value="{StaticResource PurpleBrush}"/>
+            <Setter Property="Foreground"   Value="White"/>
+            <Setter Property="Padding"      Value="18,10"/>
+            <Setter Property="FontSize"     Value="13"/>
+            <Setter Property="FontWeight"   Value="SemiBold"/>
+            <Setter Property="Cursor"       Value="Hand"/>
+            <Setter Property="Template"     Value="{StaticResource AccentBtnTpl}"/>
+        </Style>
+
+        <!-- Orange inject button -->
+        <Style x:Key="OrangeBtn" TargetType="Button">
+            <Setter Property="Background"   Value="{StaticResource OrangeBrush}"/>
             <Setter Property="Foreground"   Value="White"/>
             <Setter Property="Padding"      Value="18,10"/>
             <Setter Property="FontSize"     Value="13"/>
@@ -276,32 +288,33 @@
 
                     <TextBlock Grid.Row="0" Style="{StaticResource SectionHeader}" Text="INJECT INTO SELECTED PROCESS"/>
 
-                    <UniformGrid Grid.Row="2" Columns="3" HorizontalAlignment="Stretch">
+                    <UniformGrid Grid.Row="2" Columns="2" Rows="2" HorizontalAlignment="Stretch">
                         <!-- Fix Focus Loss -->
                         <Button x:Name="BtnFocus" Style="{StaticResource GreenBtn}"
-                                Tag="&#xE7FC;" Margin="0,0,6,0"
+                                Tag="&#xE7FC;" Margin="0,0,4,4"
                                 Click="InjectFocus">
-                            <TextBlock>
-                                <Run Text="Fix Focus Loss"/>
-                            </TextBlock>
+                            <TextBlock><Run Text="Fix Focus Loss"/></TextBlock>
                         </Button>
 
                         <!-- Bypass Screenshot -->
                         <Button x:Name="BtnScreenshot" Style="{StaticResource PurpleBtn}"
-                                Tag="&#xE722;" Margin="3,0"
+                                Tag="&#xE722;" Margin="4,0,0,4"
                                 Click="InjectScreenshot">
-                            <TextBlock>
-                                <Run Text="Bypass Screenshot"/>
-                            </TextBlock>
+                            <TextBlock><Run Text="Bypass Screenshot"/></TextBlock>
                         </Button>
 
-                        <!-- Both -->
+                        <!-- Enable Text Copy -->
+                        <Button x:Name="BtnTextCopy" Style="{StaticResource OrangeBtn}"
+                                Tag="&#xE8C8;" Margin="0,4,4,0"
+                                Click="InjectTextCopy">
+                            <TextBlock><Run Text="Enable Text Copy"/></TextBlock>
+                        </Button>
+
+                        <!-- Both / All Features -->
                         <Button x:Name="BtnBoth" Style="{StaticResource BlueBtn}"
-                                Tag="&#xE734;" Margin="6,0,0,0"
+                                Tag="&#xE734;" Margin="4,4,0,0"
                                 Click="InjectBoth">
-                            <TextBlock>
-                                <Run Text="Both Features"/>
-                            </TextBlock>
+                            <TextBlock><Run Text="All Features"/></TextBlock>
                         </Button>
                     </UniformGrid>
                 </Grid>

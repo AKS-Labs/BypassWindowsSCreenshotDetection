@@ -9,7 +9,7 @@
 #define WDA_NONE 0x00000000
 #endif
 
-// ── GetMainWindow ────────────────────────────────────────────
+// ── GetMainWindow ─────────────────────────────────────────────
 struct EnumWndArgs { HWND hwnd = nullptr; int area = -1; };
 static BOOL CALLBACK _EnumWndCb(HWND h, LPARAM lp) {
     auto* a = (EnumWndArgs*)lp;
@@ -33,35 +33,149 @@ static HWND GetMainWindow() {
     return args.hwnd;
 }
 
-// ── MinHook helper ───────────────────────────────────────────
+// ── MinHook helper ────────────────────────────────────────────
 template<typename T>
 inline MH_STATUS MH_Hook(LPVOID t, LPVOID d, T** o)
 { return MH_CreateHook(t, d, reinterpret_cast<LPVOID*>(o)); }
 
-// ── State ────────────────────────────────────────────────────
-static HWND    g_hwnd     = nullptr;
+// ── State ─────────────────────────────────────────────────────
+static HWND    g_hwnd      = nullptr;
 static BOOL    g_unfocused = FALSE;
-static WNDPROC g_oldProc  = nullptr;
+static WNDPROC g_oldProc   = nullptr;
 
-static decltype(GetForegroundWindow)*      real_GFW  = nullptr;
-static decltype(SetCursorPos)*             real_SCP  = nullptr;
-static decltype(SetWindowDisplayAffinity)* real_SWDA = nullptr;
+static decltype(GetForegroundWindow)*      real_GFW       = nullptr;
+static decltype(SetCursorPos)*             real_SCP       = nullptr;
+static decltype(SetWindowDisplayAffinity)* real_SWDA      = nullptr;
+static decltype(EmptyClipboard)*           real_Empty     = nullptr;
 
-static volatile LONG g_bypassActive = 0;
-static HANDLE        g_bypassThread = nullptr;
+static volatile LONG g_bypassActive  = 0;
+static volatile LONG g_textCopyActive = 0;
+static HANDLE        g_bypassThread  = nullptr;
 
-// ── Focus-loss detours ───────────────────────────────────────
+// ── Clipboard helpers ─────────────────────────────────────────
+static void PutTextInClipboard(HWND owner, const wchar_t* text, int len) {
+    if (!OpenClipboard(owner)) return;
+    // Use the real EmptyClipboard (bypasses our hook)
+    if (real_Empty) real_Empty(); else EmptyClipboard();
+    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, (len + 1) * sizeof(wchar_t));
+    if (hMem) {
+        wchar_t* p = (wchar_t*)GlobalLock(hMem);
+        if (p) { memcpy(p, text, len * sizeof(wchar_t)); p[len] = 0; GlobalUnlock(hMem); }
+        SetClipboardData(CF_UNICODETEXT, hMem);
+    }
+    CloseClipboard();
+}
+
+static void CopyWindowText(HWND target, HWND clipOwner) {
+    // Try EM_GETSEL first — if there's a selection in an Edit control, honour it
+    DWORD s = 0, e = 0;
+    SendMessageW(target, EM_GETSEL, (WPARAM)&s, (LPARAM)&e);
+    if (s != e) {
+        // There is a selection — let the default handler copy it; just unblock clipboard
+        return;
+    }
+    // Fall back: copy ALL text from the window
+    int len = GetWindowTextLengthW(target);
+    if (len <= 0) return;
+    wchar_t* buf = (wchar_t*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (len + 1) * sizeof(wchar_t));
+    if (!buf) return;
+    GetWindowTextW(target, buf, len + 1);
+    PutTextInClipboard(clipOwner ? clipOwner : target, buf, len);
+    HeapFree(GetProcessHeap(), 0, buf);
+}
+
+// ── EmptyClipboard detour ─────────────────────────────────────
+// Prevents the app from clearing the clipboard after a copy/screenshot
+static BOOL WINAPI Detour_EmptyClipboard() {
+    if (InterlockedCompareExchange(&g_textCopyActive, 0, 0))
+        return TRUE;  // silently block
+    return real_Empty ? real_Empty() : TRUE;
+}
+
+// ── Child window subclass proc ────────────────────────────────
+// Stored on each child window via SetPropW(hWnd, L"NFL_Orig", ...)
+static LRESULT CALLBACK ChildCopyProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    WNDPROC orig = (WNDPROC)(LONG_PTR)GetPropW(h, L"NFL_Orig");
+
+    if (msg == WM_KEYDOWN && (GetKeyState(VK_CONTROL) & 0x8000)) {
+        if (wp == 'C' || wp == VK_INSERT) {
+            CopyWindowText(h, h);
+            // Still fall through so native copy also runs (handles selections in Edit)
+        }
+        if (wp == 'A') {
+            SendMessageW(h, EM_SETSEL, 0, -1);  // Select all for Edit controls
+        }
+    }
+    if (msg == WM_NCDESTROY) {
+        RemovePropW(h, L"NFL_Orig");
+        if (orig) SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)orig);
+    }
+    return orig ? CallWindowProcW(orig, h, msg, wp, lp) : DefWindowProcW(h, msg, wp, lp);
+}
+
+static BOOL CALLBACK SubclassChild(HWND h, LPARAM) {
+    if (GetPropW(h, L"NFL_Orig")) return TRUE;  // Already done
+    WNDPROC cur = (WNDPROC)(LONG_PTR)GetWindowLongPtrW(h, GWLP_WNDPROC);
+    if (cur && cur != ChildCopyProc) {
+        SetPropW(h, L"NFL_Orig", (HANDLE)(LONG_PTR)cur);
+        SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)ChildCopyProc);
+    }
+    // Recurse into grandchildren
+    EnumChildWindows(h, SubclassChild, 0);
+    return TRUE;
+}
+
+static void EnableTextCopy() {
+    InterlockedExchange(&g_textCopyActive, 1);
+
+    // Hook EmptyClipboard so the app can't clear what we copy
+    HMODULE u32 = GetModuleHandleW(L"user32.dll");
+    if (u32 && !real_Empty) {
+        void* t = GetProcAddress(u32, "EmptyClipboard");
+        if (t) { real_Empty = EmptyClipboard; MH_Hook(t, Detour_EmptyClipboard, &real_Empty); MH_EnableHook(t); }
+    }
+
+    // Subclass all existing child windows so Ctrl+C works in them
+    if (g_hwnd) {
+        SubclassChild(g_hwnd, 0);
+        EnumChildWindows(g_hwnd, SubclassChild, 0);
+    } else {
+        DWORD pid = GetCurrentProcessId();
+        EnumWindows([](HWND h, LPARAM pid) -> BOOL {
+            DWORD wp = 0; GetWindowThreadProcessId(h, &wp);
+            if (wp == (DWORD)pid) { SubclassChild(h, 0); EnumChildWindows(h, SubclassChild, 0); }
+            return TRUE;
+        }, (LPARAM)pid);
+    }
+}
+
+// ── Focus-loss detours ────────────────────────────────────────
 static HWND WINAPI Detour_GFW()             { return g_hwnd; }
 static BOOL WINAPI Detour_SCP(int X, int Y) { return g_unfocused ? TRUE : real_SCP(X, Y); }
 
 static LRESULT CALLBACK NewWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
-    case WM_NCACTIVATE:    if (wp == FALSE) { g_unfocused = TRUE;  return 0; }
-                           else               g_unfocused = FALSE; break;
-    case WM_ACTIVATE:      if (wp == WA_INACTIVE)  return 0; break;
-    case WM_ACTIVATEAPP:   if (wp == FALSE)         return 0; break;
-    case WM_KILLFOCUS:                              return 0;
-    case WM_IME_SETCONTEXT: if (wp == FALSE)        return 0; break;
+    case WM_NCACTIVATE:     if (wp == FALSE) { g_unfocused = TRUE;  return 0; }
+                            else               g_unfocused = FALSE; break;
+    case WM_ACTIVATE:       if (wp == WA_INACTIVE)  return 0; break;
+    case WM_ACTIVATEAPP:    if (wp == FALSE)         return 0; break;
+    case WM_KILLFOCUS:                               return 0;
+    case WM_IME_SETCONTEXT: if (wp == FALSE)         return 0; break;
+
+    // Ctrl+C / Ctrl+A on main window when text copy is active
+    case WM_KEYDOWN:
+        if (InterlockedCompareExchange(&g_textCopyActive, 0, 0)) {
+            bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            if (ctrl && (wp == 'C' || wp == VK_INSERT)) {
+                HWND focused = GetFocus();
+                CopyWindowText(focused ? focused : h, h);
+            }
+            if (ctrl && wp == 'A') {
+                HWND focused = GetFocus();
+                if (focused) SendMessageW(focused, EM_SETSEL, 0, -1);
+            }
+        }
+        break;
     }
     return CallWindowProc(g_oldProc, h, msg, wp, lp);
 }
@@ -77,10 +191,9 @@ static void SetupFocusFix() {
         g_oldProc = (WNDPROC)SetWindowLongPtr(g_hwnd, GWLP_WNDPROC, (LONG_PTR)NewWndProc);
 }
 
-// ── Screenshot bypass ────────────────────────────────────────
+// ── Screenshot bypass ─────────────────────────────────────────
 static BOOL WINAPI Detour_SWDA(HWND hWnd, DWORD) {
-    if (real_SWDA) real_SWDA(hWnd, WDA_NONE);
-    return TRUE;
+    if (real_SWDA) real_SWDA(hWnd, WDA_NONE); return TRUE;
 }
 static BOOL CALLBACK _ResetChild(HWND h, LPARAM) { SetWindowDisplayAffinity(h, WDA_NONE); return TRUE; }
 static void StripAllProtection() {
@@ -113,26 +226,34 @@ static void StopScreenshotBypass() {
     real_SWDA = nullptr;
 }
 
-// ── Init thread: reads named events set by GUI before injection ──
-// Local\NFL_Focus_{PID}  → enable focus loss fix
-// Local\NFL_Bypass_{PID} → enable screenshot bypass
+// ── Init thread ───────────────────────────────────────────────
+// Reads named events created by GUI before injection:
+//   Local\NFL_Focus_{PID}    → fix focus loss
+//   Local\NFL_Bypass_{PID}   → bypass screenshot
+//   Local\NFL_TextCopy_{PID} → enable text copy
 static DWORD WINAPI InitThread(LPVOID) {
-    Sleep(100); // let LoadLibrary finish
+    Sleep(100);
     wchar_t name[128];
+
     swprintf_s(name, 128, L"Local\\NFL_Focus_%lu", GetCurrentProcessId());
-    HANDLE hF = OpenEventW(SYNCHRONIZE, FALSE, name);
-    bool doFocus = (hF != nullptr); if (hF) CloseHandle(hF);
+    HANDLE h = OpenEventW(SYNCHRONIZE, FALSE, name);
+    bool doFocus = h != nullptr; if (h) CloseHandle(h);
 
     swprintf_s(name, 128, L"Local\\NFL_Bypass_%lu", GetCurrentProcessId());
-    HANDLE hB = OpenEventW(SYNCHRONIZE, FALSE, name);
-    bool doBypass = (hB != nullptr); if (hB) CloseHandle(hB);
+    h = OpenEventW(SYNCHRONIZE, FALSE, name);
+    bool doBypass = h != nullptr; if (h) CloseHandle(h);
 
-    if (doFocus)  SetupFocusFix();
-    if (doBypass) StartScreenshotBypass();
+    swprintf_s(name, 128, L"Local\\NFL_TextCopy_%lu", GetCurrentProcessId());
+    h = OpenEventW(SYNCHRONIZE, FALSE, name);
+    bool doTextCopy = h != nullptr; if (h) CloseHandle(h);
+
+    if (doFocus)    SetupFocusFix();
+    if (doBypass)   StartScreenshotBypass();
+    if (doTextCopy) EnableTextCopy();
     return 0;
 }
 
-// ── DllMain ──────────────────────────────────────────────────
+// ── DllMain ───────────────────────────────────────────────────
 BOOL APIENTRY DllMain(HMODULE hMod, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hMod);
@@ -142,6 +263,7 @@ BOOL APIENTRY DllMain(HMODULE hMod, DWORD reason, LPVOID) {
     }
     else if (reason == DLL_PROCESS_DETACH) {
         StopScreenshotBypass();
+        InterlockedExchange(&g_textCopyActive, 0);
         if (g_hwnd && g_oldProc) SetWindowLongPtr(g_hwnd, GWLP_WNDPROC, (LONG_PTR)g_oldProc);
         MH_DisableHook(MH_ALL_HOOKS);
         MH_Uninitialize();
