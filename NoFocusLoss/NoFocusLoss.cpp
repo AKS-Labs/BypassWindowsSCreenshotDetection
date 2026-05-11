@@ -1,10 +1,10 @@
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
+#include <UIAutomation.h>
 #include <Windows.h>
 #include <stdio.h>
-#include <UIAutomation.h>
-#include "MinHook.h"
 #include <TlHelp32.h>
+#include "MinHook.h"
+
+#define NOMINMAX
 
 #ifndef WDA_NONE
 #define WDA_NONE 0x00000000
