@@ -2,6 +2,7 @@
 #define NOMINMAX
 #include <Windows.h>
 #include <stdio.h>
+#include <UIAutomation.h>
 #include "MinHook.h"
 #include <TlHelp32.h>
 
@@ -52,10 +53,59 @@ static volatile LONG g_bypassActive  = 0;
 static volatile LONG g_textCopyActive = 0;
 static HANDLE        g_bypassThread  = nullptr;
 
+// ── UI Automation Helper ──────────────────────────────────────
+static void GetTextViaUIA(HWND owner) {
+    IUIAutomation* pAutomation = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_CUIAutomation, NULL, CLSCTX_INPROC_SERVER, IID_IUIAutomation, (void**)&pAutomation);
+    if (FAILED(hr) || !pAutomation) return;
+
+    POINT pt;
+    GetCursorPos(&pt);
+
+    IUIAutomationElement* pElement = nullptr;
+    hr = pAutomation->ElementFromPoint(pt, &pElement);
+    if (SUCCEEDED(hr) && pElement) {
+        BSTR text = NULL;
+        // Try to get Value first (for input fields)
+        IUIAutomationValuePattern* pValuePattern = nullptr;
+        pElement->GetCurrentPattern(UIA_ValuePatternId, (IUnknown**)&pValuePattern);
+        if (pValuePattern) {
+            pValuePattern->get_CurrentValue(&text);
+            pValuePattern->Release();
+        }
+
+        // Fallback to Name or HelpText if Value is empty
+        if (!text || SysStringLen(text) == 0) {
+            pElement->get_CurrentName(&text);
+        }
+
+        if (text && SysStringLen(text) > 0) {
+            if (!OpenClipboard(owner)) {
+                SysFreeString(text);
+                pElement->Release();
+                pAutomation->Release();
+                return;
+            }
+            if (real_Empty) real_Empty(); else EmptyClipboard();
+            
+            size_t len = SysStringLen(text);
+            HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, (len + 1) * sizeof(wchar_t));
+            if (hMem) {
+                wchar_t* p = (wchar_t*)GlobalLock(hMem);
+                if (p) { memcpy(p, text, (len + 1) * sizeof(wchar_t)); GlobalUnlock(hMem); }
+                SetClipboardData(CF_UNICODETEXT, hMem);
+            }
+            CloseClipboard();
+            SysFreeString(text);
+        }
+        pElement->Release();
+    }
+    pAutomation->Release();
+}
+
 // ── Clipboard helpers ─────────────────────────────────────────
 static void PutTextInClipboard(HWND owner, const wchar_t* text, int len) {
     if (!OpenClipboard(owner)) return;
-    // Use the real EmptyClipboard (bypasses our hook)
     if (real_Empty) real_Empty(); else EmptyClipboard();
     HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, (len + 1) * sizeof(wchar_t));
     if (hMem) {
@@ -67,16 +117,17 @@ static void PutTextInClipboard(HWND owner, const wchar_t* text, int len) {
 }
 
 static void CopyWindowText(HWND target, HWND clipOwner) {
-    // Try EM_GETSEL first — if there's a selection in an Edit control, honour it
     DWORD s = 0, e = 0;
     SendMessageW(target, EM_GETSEL, (WPARAM)&s, (LPARAM)&e);
-    if (s != e) {
-        // There is a selection — let the default handler copy it; just unblock clipboard
+    if (s != e) return;
+
+    int len = GetWindowTextLengthW(target);
+    if (len <= 0) {
+        // Standard method failed, try UI Automation (works for browsers)
+        GetTextViaUIA(clipOwner ? clipOwner : target);
         return;
     }
-    // Fall back: copy ALL text from the window
-    int len = GetWindowTextLengthW(target);
-    if (len <= 0) return;
+
     wchar_t* buf = (wchar_t*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (len + 1) * sizeof(wchar_t));
     if (!buf) return;
     GetWindowTextW(target, buf, len + 1);
@@ -85,25 +136,22 @@ static void CopyWindowText(HWND target, HWND clipOwner) {
 }
 
 // ── EmptyClipboard detour ─────────────────────────────────────
-// Prevents the app from clearing the clipboard after a copy/screenshot
 static BOOL WINAPI Detour_EmptyClipboard() {
     if (InterlockedCompareExchange(&g_textCopyActive, 0, 0))
-        return TRUE;  // silently block
+        return TRUE;
     return real_Empty ? real_Empty() : TRUE;
 }
 
 // ── Child window subclass proc ────────────────────────────────
-// Stored on each child window via SetPropW(hWnd, L"NFL_Orig", ...)
 static LRESULT CALLBACK ChildCopyProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     WNDPROC orig = (WNDPROC)(LONG_PTR)GetPropW(h, L"NFL_Orig");
 
     if (msg == WM_KEYDOWN && (GetKeyState(VK_CONTROL) & 0x8000)) {
         if (wp == 'C' || wp == VK_INSERT) {
             CopyWindowText(h, h);
-            // Still fall through so native copy also runs (handles selections in Edit)
         }
         if (wp == 'A') {
-            SendMessageW(h, EM_SETSEL, 0, -1);  // Select all for Edit controls
+            SendMessageW(h, EM_SETSEL, 0, -1);
         }
     }
     if (msg == WM_NCDESTROY) {
@@ -114,28 +162,23 @@ static LRESULT CALLBACK ChildCopyProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 static BOOL CALLBACK SubclassChild(HWND h, LPARAM) {
-    if (GetPropW(h, L"NFL_Orig")) return TRUE;  // Already done
+    if (GetPropW(h, L"NFL_Orig")) return TRUE;
     WNDPROC cur = (WNDPROC)(LONG_PTR)GetWindowLongPtrW(h, GWLP_WNDPROC);
     if (cur && cur != ChildCopyProc) {
         SetPropW(h, L"NFL_Orig", (HANDLE)(LONG_PTR)cur);
         SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)ChildCopyProc);
     }
-    // Recurse into grandchildren
     EnumChildWindows(h, SubclassChild, 0);
     return TRUE;
 }
 
 static void EnableTextCopy() {
     InterlockedExchange(&g_textCopyActive, 1);
-
-    // Hook EmptyClipboard so the app can't clear what we copy
     HMODULE u32 = GetModuleHandleW(L"user32.dll");
     if (u32 && !real_Empty) {
         void* t = GetProcAddress(u32, "EmptyClipboard");
         if (t) { real_Empty = EmptyClipboard; MH_Hook(t, Detour_EmptyClipboard, &real_Empty); MH_EnableHook(t); }
     }
-
-    // Subclass all existing child windows so Ctrl+C works in them
     if (g_hwnd) {
         SubclassChild(g_hwnd, 0);
         EnumChildWindows(g_hwnd, SubclassChild, 0);
@@ -162,7 +205,6 @@ static LRESULT CALLBACK NewWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_KILLFOCUS:                               return 0;
     case WM_IME_SETCONTEXT: if (wp == FALSE)         return 0; break;
 
-    // Ctrl+C / Ctrl+A on main window when text copy is active
     case WM_KEYDOWN:
         if (InterlockedCompareExchange(&g_textCopyActive, 0, 0)) {
             bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
@@ -227,11 +269,8 @@ static void StopScreenshotBypass() {
 }
 
 // ── Init thread ───────────────────────────────────────────────
-// Reads named events created by GUI before injection:
-//   Local\NFL_Focus_{PID}    → fix focus loss
-//   Local\NFL_Bypass_{PID}   → bypass screenshot
-//   Local\NFL_TextCopy_{PID} → enable text copy
 static DWORD WINAPI InitThread(LPVOID) {
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     Sleep(100);
     wchar_t name[128];
 
@@ -267,6 +306,7 @@ BOOL APIENTRY DllMain(HMODULE hMod, DWORD reason, LPVOID) {
         if (g_hwnd && g_oldProc) SetWindowLongPtr(g_hwnd, GWLP_WNDPROC, (LONG_PTR)g_oldProc);
         MH_DisableHook(MH_ALL_HOOKS);
         MH_Uninitialize();
+        CoUninitialize();
     }
     return TRUE;
 }

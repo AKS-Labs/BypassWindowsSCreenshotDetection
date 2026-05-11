@@ -59,6 +59,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
+      <AdditionalDependencies>ole32.lib;oleaut32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
       <Command>if not exist "$(SolutionDir)NoFocusLossGUI\bin\$(ConfigurationName)" mkdir "$(SolutionDir)NoFocusLossGUI\bin\$(ConfigurationName)"
